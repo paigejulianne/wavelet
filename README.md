@@ -26,7 +26,8 @@ src/cli.c           command-line front-end (+ netpbm I/O)
 gui/main.c          Win32 GUI (compress / decompress / view images)
 gui/image_io.c      BMP + PGM/PPM load/save for the GUI
 gui/png.c           dependency-free PNG decoder (inflate + unfilter)
-gui/app.rc          application-icon resource (embedded in the exes)
+gui/app.rc          icon + manifest resources (embedded in the exes)
+gui/app.manifest    Common Controls v6 (themed UI) + Per-Monitor-v2 DPI
 assets/logo.png     app logo (512x512 RGBA)
 assets/logo.ico     multi-size app icon (16..256)
 tools/make_logo.py  regenerates the logo assets (stdlib only)
@@ -108,6 +109,9 @@ compressing, decompressing, and viewing wavelet images.
 - **Drag & drop** — drop an image or a `.wvlc` onto the window to open it.
 - The window and both executables carry the app icon (`assets/logo.ico`,
   embedded via `gui/app.rc`).
+- The UI is **themed** (Common Controls v6) and **Per-Monitor-v2 DPI-aware**
+  via `gui/app.manifest`: modern Segoe UI controls that stay crisp at any
+  display scale, over a light command strip / dark image canvas.
 
 PNG input is handled by a small self-contained decoder (`gui/png.c`:
 DEFLATE inflate + all five scanline filters, grayscale / RGB / palette /

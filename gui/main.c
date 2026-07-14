@@ -6,6 +6,11 @@
  * and view existing .wvlc images, and export the viewed image back to an image
  * file. Links against wavelet.dll.
  *
+ * The UI is themed (Common Controls v6 via the embedded manifest), DPI-aware
+ * (every metric is scaled from a 96-dpi baseline through the S() helper), and
+ * rendered with the Segoe UI font over a cohesive light-toolbar / dark-canvas
+ * layout.
+ *
  * A headless "--selftest <image> <outdir>" path exercises the whole
  * load -> compress -> decompress -> render pipeline for CI without a display.
  */
@@ -22,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <math.h>
 
 #include "wavelet.h"
@@ -42,24 +48,95 @@
 #define ID_SPLIT      1007
 #define IDI_APPICON   101
 
-#define TOOLBAR_H 46
-#define STATUS_H  26
+/* WM_DPICHANGED predates some SDKs we might build against. */
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
 
-static HWND g_main, g_track, g_qval, g_chkLossless, g_chkSplit, g_btnCompress, g_btnSave, g_status;
+/* ---------------- theme ---------------- */
+/* A cohesive modern palette: a light Windows-11-style command strip on top,
+ * a neutral-dark image canvas below (the standard image-viewer aesthetic). */
+#define COL_TOOLBAR   RGB(247, 248, 250)
+#define COL_TOOLBAR_B RGB(220, 223, 228)   /* toolbar / status hairline border */
+#define COL_TEXT      RGB(32,  34,  38)
+#define COL_TEXT_DIM  RGB(96, 100, 108)
+#define COL_CANVAS    RGB(30,  32,  36)
+#define COL_CAPTION   RGB(22,  24,  28)
+#define COL_CAPTION_T RGB(222, 226, 232)
+#define COL_HINT      RGB(150, 155, 162)
+
+static HWND g_main;
+static HWND g_btnOpenImg, g_btnOpenWvlc, g_btnCompress, g_btnSave;
+static HWND g_track, g_qval, g_chkLossless, g_chkSplit;
+static HFONT g_font;
+static HBRUSH g_brToolbar;
+static UINT   g_dpi = 96;
+static int    g_toolH = 46, g_statH = 26;   /* recomputed per-DPI */
+static char   g_statusText[600] = "Ready.";
+
 static Image  g_source;       /* original / source image (for compression + RMSE) */
 static Image  g_view;         /* currently displayed reconstruction / image        */
 static int    g_quality = 80;
 static int    g_have_recon = 0;   /* g_view is a reconstruction distinct from source */
 static double g_last_rmse = -1.0;
 
+/* Scale a 96-dpi design metric to the current DPI. */
+#define S(x) MulDiv((x), (int)g_dpi, 96)
+
+/* ---------------- DPI helpers ---------------- */
+
+/* GetDpiForWindow (Win10 1607+) resolved dynamically so we still build/run on
+ * older toolchains and systems; falls back to the device-context DPI. */
+static UINT win_dpi(HWND h) {
+    typedef UINT (WINAPI *GetDpiForWindow_t)(HWND);
+    static GetDpiForWindow_t fn = NULL;
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        HMODULE u = GetModuleHandleA("user32.dll");
+        if (u) fn = (GetDpiForWindow_t)GetProcAddress(u, "GetDpiForWindow");
+    }
+    if (fn) { UINT d = fn(h); if (d) return d; }
+    HDC dc = GetDC(h);
+    UINT d = dc ? (UINT)GetDeviceCaps(dc, LOGPIXELSX) : 96;
+    if (dc) ReleaseDC(h, dc);
+    return d ? d : 96;
+}
+
+static void make_font(void) {
+    if (g_font) DeleteObject(g_font);
+    LOGFONTA lf;
+    ZeroMemory(&lf, sizeof lf);
+    lf.lfHeight = -MulDiv(10, (int)g_dpi, 72);   /* 10pt Segoe UI */
+    lf.lfWeight = FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    lstrcpyA(lf.lfFaceName, "Segoe UI");
+    g_font = CreateFontIndirectA(&lf);
+    if (!g_font) g_font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+}
+
+static void set_ctl_font(HWND c) {
+    if (c) SendMessageA(c, WM_SETFONT, (WPARAM)g_font, TRUE);
+}
+static void apply_font_all(void) {
+    set_ctl_font(g_btnOpenImg);  set_ctl_font(g_btnOpenWvlc);
+    set_ctl_font(g_btnCompress); set_ctl_font(g_btnSave);
+    set_ctl_font(g_chkLossless); set_ctl_font(g_track);
+    set_ctl_font(g_qval);        set_ctl_font(g_chkSplit);
+}
+
 /* ---------------- utilities ---------------- */
 
 static void set_status(const char *fmt, ...) {
-    char buf[600];
     va_list ap; va_start(ap, fmt);
-    vsnprintf(buf, sizeof buf, fmt, ap);
+    vsnprintf(g_statusText, sizeof g_statusText, fmt, ap);
     va_end(ap);
-    if (g_status) SetWindowTextA(g_status, buf);
+    if (g_main) {
+        RECT rc; GetClientRect(g_main, &rc);
+        RECT st = { 0, rc.bottom - g_statH, rc.right, rc.bottom };
+        InvalidateRect(g_main, &st, FALSE);
+    }
 }
 
 static uint8_t *read_file(const char *path, size_t *len) {
@@ -95,8 +172,8 @@ static int is_lossless(void) {
 
 static void update_quality_label(void) {
     char b[32];
-    if (is_lossless()) strcpy(b, "lossless");
-    else sprintf(b, "Q %d", g_quality);
+    if (is_lossless()) strcpy(b, "Lossless");
+    else sprintf(b, "Quality %d", g_quality);
     SetWindowTextA(g_qval, b);
 }
 
@@ -115,7 +192,7 @@ static int dlg_open(HWND h, const char *filter, char *out, size_t n) {
     out[0] = 0;
     ofn.lStructSize = sizeof ofn; ofn.hwndOwner = h;
     ofn.lpstrFilter = filter; ofn.lpstrFile = out; ofn.nMaxFile = (DWORD)n;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_EXPLORER;
     return GetOpenFileNameA(&ofn);
 }
 static int dlg_save(HWND h, const char *filter, const char *defext, char *out, size_t n) {
@@ -123,7 +200,7 @@ static int dlg_save(HWND h, const char *filter, const char *defext, char *out, s
     ofn.lStructSize = sizeof ofn; ofn.hwndOwner = h;
     ofn.lpstrFilter = filter; ofn.lpstrFile = out; ofn.nMaxFile = (DWORD)n;
     ofn.lpstrDefExt = defext;
-    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_EXPLORER;
     return GetSaveFileNameA(&ofn);
 }
 
@@ -273,23 +350,33 @@ static void draw_image_in(HDC hdc, const Image *im, RECT area) {
 
 /* Caption bar at the top of a pane. */
 static void draw_caption(HDC hdc, RECT pane, const char *text) {
-    RECT bar = { pane.left, pane.top, pane.right, pane.top + 22 };
-    HBRUSH b = CreateSolidBrush(RGB(20, 22, 26));
+    int barh = S(24);
+    RECT bar = { pane.left, pane.top, pane.right, pane.top + barh };
+    HBRUSH b = CreateSolidBrush(COL_CAPTION);
     FillRect(hdc, &bar, b);
     DeleteObject(b);
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(210, 214, 220));
-    bar.left += 8;
-    DrawTextA(hdc, text, -1, &bar, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    SetTextColor(hdc, COL_CAPTION_T);
+    bar.left += S(10);
+    DrawTextA(hdc, text, -1, &bar, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 }
 
 static void paint(HWND h) {
     PAINTSTRUCT ps;
     HDC hdc = BeginPaint(h, &ps);
     RECT rc; GetClientRect(h, &rc);
-    RECT area = { 0, TOOLBAR_H, rc.right, rc.bottom - STATUS_H };
+    HFONT old = (HFONT)SelectObject(hdc, g_font);
 
-    HBRUSH bg = CreateSolidBrush(RGB(32, 34, 38));
+    /* command strip (top) */
+    RECT tb = { 0, 0, rc.right, g_toolH };
+    FillRect(hdc, &tb, g_brToolbar);
+    RECT tbb = { 0, g_toolH - 1, rc.right, g_toolH };
+    HBRUSH bd = CreateSolidBrush(COL_TOOLBAR_B);
+    FillRect(hdc, &tbb, bd);
+
+    /* image canvas (middle) */
+    RECT area = { 0, g_toolH, rc.right, rc.bottom - g_statH };
+    HBRUSH bg = CreateSolidBrush(COL_CANVAS);
     FillRect(hdc, &area, bg);
     DeleteObject(bg);
 
@@ -297,16 +384,17 @@ static void paint(HWND h) {
                 && g_source.px && g_view.px;
 
     if (split) {
+        int barh = S(24);
         int mid = (area.left + area.right) / 2;
         RECT left  = { area.left, area.top, mid - 1, area.bottom };
         RECT right = { mid + 1, area.top, area.right, area.bottom };
-        RECT limg = { left.left, left.top + 22, left.right, left.bottom };
-        RECT rimg = { right.left, right.top + 22, right.right, right.bottom };
+        RECT limg = { left.left, left.top + barh, left.right, left.bottom };
+        RECT rimg = { right.left, right.top + barh, right.right, right.bottom };
         draw_image_in(hdc, &g_source, limg);
         draw_image_in(hdc, &g_view, rimg);
         /* divider */
         RECT div = { mid - 1, area.top, mid + 1, area.bottom };
-        HBRUSH d = CreateSolidBrush(RGB(20, 22, 26)); FillRect(hdc, &div, d); DeleteObject(d);
+        FillRect(hdc, &div, bd);
         char cap[128];
         draw_caption(hdc, left, "Original");
         if (g_have_recon && g_last_rmse >= 0) sprintf(cap, "Reconstruction   RMSE %.2f", g_last_rmse);
@@ -316,61 +404,113 @@ static void paint(HWND h) {
         draw_image_in(hdc, &g_view, area);
     } else {
         SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(150, 150, 155));
-        const char *msg = "Open an image to compress, or open a .wvlc to view.  (drag & drop supported)";
-        DrawTextA(hdc, msg, -1, &area, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SetTextColor(hdc, COL_HINT);
+        const char *msg = "Open an image to compress, or open a .wvlc to view.   Drag & drop is supported.";
+        DrawTextA(hdc, msg, -1, &area, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
+
+    /* status strip (bottom) */
+    RECT st = { 0, rc.bottom - g_statH, rc.right, rc.bottom };
+    FillRect(hdc, &st, g_brToolbar);
+    RECT stb = { 0, st.top, rc.right, st.top + 1 };
+    FillRect(hdc, &stb, bd);
+    DeleteObject(bd);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, COL_TEXT_DIM);
+    RECT stt = st; stt.left += S(12); stt.right -= S(12);
+    DrawTextA(hdc, g_statusText, -1, &stt, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+    SelectObject(hdc, old);
     EndPaint(h, &ps);
 }
 
 /* ---------------- window ---------------- */
 
-static HWND mk_button(HWND parent, const char *text, int id, int x, int w) {
-    return CreateWindowA("BUTTON", text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                         x, 9, w, 28, parent, (HMENU)(INT_PTR)id, NULL, NULL);
+static HWND mk_button(HWND parent, const char *text, int id) {
+    return CreateWindowA("BUTTON", text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP,
+                         0, 0, 0, 0, parent, (HMENU)(INT_PTR)id, NULL, NULL);
+}
+
+/* Position the command-strip controls for the current DPI. */
+static void relayout_toolbar(void) {
+    int pad = S(10), gap = S(6);
+    int by = S(9),  bh = S(28);      /* buttons */
+    int cy = S(13), ch = S(22);      /* checkboxes / label */
+    int x  = pad;
+
+    MoveWindow(g_btnOpenImg,  x, by, S(112), bh, TRUE); x += S(112) + gap;
+    MoveWindow(g_btnOpenWvlc, x, by, S(108), bh, TRUE); x += S(108) + gap;
+    MoveWindow(g_btnCompress, x, by, S(150), bh, TRUE); x += S(150) + gap;
+    MoveWindow(g_btnSave,     x, by, S(108), bh, TRUE); x += S(108) + S(16);
+
+    MoveWindow(g_chkLossless, x, cy, S(88), ch, TRUE);  x += S(88)  + gap;
+    MoveWindow(g_track,       x, S(11), S(150), S(26), TRUE); x += S(150) + gap;
+    MoveWindow(g_qval,        x, cy, S(90), ch, TRUE);  x += S(90)  + S(12);
+    MoveWindow(g_chkSplit,    x, cy, S(96), ch, TRUE);
 }
 
 static void create_controls(HWND h) {
-    int x = 8;
-    mk_button(h, "Open Image\x85", ID_OPEN_IMG, x, 108); x += 114;
-    mk_button(h, "Open .wvlc\x85", ID_OPEN_WVLC, x, 104); x += 110;
-    g_btnCompress = mk_button(h, "Compress && Save\x85", ID_COMPRESS, x, 138); x += 144;
-    g_btnSave = mk_button(h, "Save Image\x85", ID_SAVE_IMG, x, 104); x += 116;
+    g_btnOpenImg  = mk_button(h, "Open Image\x85", ID_OPEN_IMG);
+    g_btnOpenWvlc = mk_button(h, "Open .wvlc\x85", ID_OPEN_WVLC);
+    g_btnCompress = mk_button(h, "Compress && Save\x85", ID_COMPRESS);
+    g_btnSave     = mk_button(h, "Save Image\x85", ID_SAVE_IMG);
 
-    g_chkLossless = CreateWindowA("BUTTON", "Lossless", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                                  x, 13, 84, 20, h, (HMENU)ID_LOSSLESS, NULL, NULL);
-    x += 90;
+    g_chkLossless = CreateWindowA("BUTTON", "Lossless", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                  0, 0, 0, 0, h, (HMENU)ID_LOSSLESS, NULL, NULL);
 
-    g_track = CreateWindowA(TRACKBAR_CLASS, "", WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                            x, 11, 150, 26, h, (HMENU)ID_QUALITY, NULL, NULL);
+    g_track = CreateWindowA(TRACKBAR_CLASS, "", WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_NOTICKS,
+                            0, 0, 0, 0, h, (HMENU)ID_QUALITY, NULL, NULL);
     SendMessageA(g_track, TBM_SETRANGE, TRUE, MAKELONG(1, 100));
     SendMessageA(g_track, TBM_SETPOS, TRUE, g_quality);
-    x += 156;
 
-    g_qval = CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT,
-                           x, 13, 72, 20, h, NULL, NULL, NULL);
-    x += 76;
+    g_qval = CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE,
+                           0, 0, 0, 0, h, NULL, NULL, NULL);
 
-    g_chkSplit = CreateWindowA("BUTTON", "Split view", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                               x, 13, 96, 20, h, (HMENU)ID_SPLIT, NULL, NULL);
+    g_chkSplit = CreateWindowA("BUTTON", "Split view", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                               0, 0, 0, 0, h, (HMENU)ID_SPLIT, NULL, NULL);
 
-    g_status = CreateWindowA("STATIC", "Ready.", WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_CENTERIMAGE,
-                             8, 0, 100, STATUS_H, h, NULL, NULL, NULL);
-
+    apply_font_all();
+    relayout_toolbar();
     EnableWindow(g_btnCompress, FALSE);
     EnableWindow(g_btnSave, FALSE);
     update_quality_label();
 }
 
-static void layout(HWND h) {
-    RECT rc; GetClientRect(h, &rc);
-    MoveWindow(g_status, 8, rc.bottom - STATUS_H, rc.right - 16, STATUS_H, TRUE);
-}
-
 static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_CREATE:      create_controls(h); DragAcceptFiles(h, TRUE); return 0;
-    case WM_SIZE:        layout(h); return 0;
+    case WM_CREATE:
+        g_dpi = win_dpi(h);
+        g_toolH = S(46); g_statH = S(26);
+        make_font();
+        g_brToolbar = CreateSolidBrush(COL_TOOLBAR);
+        create_controls(h);
+        DragAcceptFiles(h, TRUE);
+        return 0;
+    case WM_SIZE:
+        relayout_toolbar();
+        InvalidateRect(h, NULL, FALSE);
+        return 0;
+    case WM_DPICHANGED: {
+        g_dpi = HIWORD(wp);
+        g_toolH = S(46); g_statH = S(26);
+        make_font();
+        apply_font_all();
+        RECT *pr = (RECT *)lp;   /* suggested position + size for the new DPI */
+        SetWindowPos(h, NULL, pr->left, pr->top, pr->right - pr->left, pr->bottom - pr->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        relayout_toolbar();
+        InvalidateRect(h, NULL, TRUE);
+        return 0;
+    }
+    /* Blend the themed toolbar controls (checkboxes, trackbar, label) into the
+     * light command strip instead of the default window-grey. */
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN: {
+        HDC dc = (HDC)wp;
+        SetBkColor(dc, COL_TOOLBAR);
+        SetTextColor(dc, COL_TEXT);
+        return (LRESULT)g_brToolbar;
+    }
     case WM_DROPFILES: {
         HDROP drop = (HDROP)wp;
         char path[MAX_PATH];
@@ -409,6 +549,8 @@ static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DESTROY:
         img_free(&g_source); img_free(&g_view);
+        if (g_font) { DeleteObject(g_font); g_font = NULL; }
+        if (g_brToolbar) { DeleteObject(g_brToolbar); g_brToolbar = NULL; }
         PostQuitMessage(0);
         return 0;
     }
@@ -489,7 +631,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = NULL;                 /* fully painted in WM_PAINT */
     wc.lpszClassName = "WaveletGuiWindow";
     wc.hIcon = LoadIconA(inst, MAKEINTRESOURCEA(IDI_APPICON));
     if (!wc.hIcon) wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
@@ -499,6 +641,17 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
                            WS_OVERLAPPEDWINDOW,
                            CW_USEDEFAULT, CW_USEDEFAULT, 960, 680,
                            NULL, NULL, inst, NULL);
+
+    /* Size the initial window for the monitor's DPI (WM_CREATE already laid the
+     * controls out at g_dpi; scale the outer frame to match). */
+    if (g_dpi != 96) {
+        RECT wr; GetWindowRect(g_main, &wr);
+        SetWindowPos(g_main, NULL, 0, 0,
+                     MulDiv(wr.right - wr.left, (int)g_dpi, 96),
+                     MulDiv(wr.bottom - wr.top, (int)g_dpi, 96),
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
     ShowWindow(g_main, show);
     UpdateWindow(g_main);
 

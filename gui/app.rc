@@ -1,4 +1,10 @@
-/* app.rc -- application icon resource. The lowest-numbered ICON becomes the
- * executable's shell icon (shown in Explorer / taskbar). */
+/* app.rc -- application resources.
+ *
+ * The lowest-numbered ICON becomes the executable's shell icon (shown in
+ * Explorer / taskbar). The RT_MANIFEST resource enables Common Controls v6
+ * (modern themed controls) and Per-Monitor-v2 DPI awareness for the GUI. */
 #define IDI_APPICON 101
 IDI_APPICON ICON "../assets/logo.ico"
+
+/* 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID, 24 = RT_MANIFEST */
+1 24 "app.manifest"

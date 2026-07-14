@@ -9,7 +9,7 @@ OutputDir=build
 OutputBaseFilename=WaveletSetup
 Compression=lzma
 SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 ; HKCR / HKLM writes below need elevation.
 PrivilegesRequired=admin

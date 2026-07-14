@@ -502,6 +502,16 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     ShowWindow(g_main, show);
     UpdateWindow(g_main);
 
+    if (__argc >= 2 && strcmp(__argv[1], "--selftest") != 0) {
+        const char *path = __argv[1];
+        size_t n = strlen(path);
+        if (n >= 5 && _stricmp(path + n - 5, ".wvlc") == 0) {
+            load_wvlc_path(g_main, path);
+        } else {
+            load_image_path(g_main, path);
+        }
+    }
+
     MSG m;
     while (GetMessage(&m, NULL, 0, 0)) {
         if (IsDialogMessage(g_main, &m)) continue;   /* tab navigation */

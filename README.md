@@ -32,7 +32,7 @@ assets/logo.ico     multi-size app icon (16..256)
 tools/make_logo.py  regenerates the logo assets (stdlib only)
 test/test.c         in-process self-test
 CMakeLists.txt      cross-platform build
-build.ps1           Windows one-shot build (MSVC, no CMake needed)
+build.bat           Windows one-shot build (MSVC, no CMake needed)
 build.sh            Linux/macOS one-shot build (gcc/clang)
 ```
 
@@ -51,8 +51,8 @@ Products land in `build/`: the shared library, the `wavelet` CLI, and
 
 ### Windows without CMake
 
-```powershell
-.\build.ps1        # uses the installed Visual Studio (MSVC) toolchain
+```cmd
+.\build.bat        # uses the installed Visual Studio (MSVC) toolchain
 ```
 → `build\wavelet.dll`, `build\wavelet.lib`, `build\wavelet.exe`, `build\wavelet_test.exe`
 
@@ -115,7 +115,7 @@ alpha, 8-bit non-interlaced) — no libpng/zlib dependency.
 
 Regenerate the logo assets any time with `python tools/make_logo.py`.
 
-Build it with `build.ps1` (or CMake on Windows), then run `wavelet_gui.exe`.
+Build it with `build.bat` (or CMake on Windows), then run `wavelet_gui.exe`.
 It must sit next to `wavelet.dll`.
 
 A headless pipeline check (load → compress → decompress → render → save,
